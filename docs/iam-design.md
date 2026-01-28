@@ -1,5 +1,6 @@
 # IAM Design 
 ## Terraform & CI/CD Execution Model
+| Field | Description |
 | :--- | :--- |
 | **Status** | Final / Production-ready blueprint |
 | **Date** | January 2026 |
