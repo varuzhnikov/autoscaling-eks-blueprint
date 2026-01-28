@@ -1,11 +1,11 @@
 # IAM Design 
 ## Terraform & CI/CD Execution Model
-
-**Status**: Final / Production-ready blueprint
-**Date**: January 2026
-**Audience**: Platform Engineers
-**Scope**: IAM, identity, Terraform execution, CI/CD
-**Out of scope**: EKS workloads, application runtime IAM
+| :--- | :--- |
+| **Status** | Final / Production-ready blueprint |
+| **Date** | January 2026 |
+| **Audience** | Platform Engineers |
+| **Scope** | IAM, identity, Terraform execution, CI/CD |
+| **Out of scope** | EKS workloads, application runtime IAM |
 
 ## 1. Purpose
 
@@ -43,7 +43,7 @@ The platform uses **AWS Organizations**.
 
 | Account | Purpose |
 | :---    | :---    |
-| ** Management** | Identity & IAM control plane, Terraform management |
+| **Management** | Identity & IAM control plane, Terraform management |
 | **Dev** | Sandbox, experimentation |
 | **Stage** | Pre-production validation |
 | **Prod** | Production workloads |
