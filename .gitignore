@@ -42,3 +42,6 @@ docs/internal/
 
 # Ignore debug.log
 debug.log
+
+# Ignore scripts folder
+scripts/
