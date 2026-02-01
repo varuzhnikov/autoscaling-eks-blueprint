@@ -78,6 +78,19 @@ The **Management account** is the IAM and Terraform **control plane**.
 - Store business data
 - Serve traffic
 
+### Why Management Uses SSO (PlatformAdmins)
+
+The Management account is operated by PlatformAdmins via SSO. This is the correct approach because:
+
+- **Management is a control plane**, not a workload account
+- It contains no production data or applications
+- PlatformAdmins (typically 1-2 trusted operators in SMB/startups) manage IAM roles across all accounts
+- IAM changes in member accounts are applied from Management using cross-account assume role (`OrganizationAccountAccessRole` or equivalent bootstrap role)
+- TerraformExecutionRole-* in workload accounts do NOT have IAM write permissions
+- Centralized state bucket in Management is isolated via IAM policy prefix guards
+
+This architecture provides sufficient security for SMB/startup teams while maintaining operational simplicity.
+
 ## 5. PlatformAdmins
 
 ### Who They Are
@@ -131,6 +144,16 @@ From Management:
 IAM Identity Center → Enable
 ```
 
+### Step 4 — Bootstrap member-account access (one-time)
+
+Initial Terraform apply from Management account uses cross-account assume role
+(```OrganizationAccountAccessRole``` by default) to create ```TerraformExecutionRole-*```
+in member accounts.
+
+**Note:** While PlatformAdmins may have AdministratorAccess via SSO in member accounts,
+the architecture uses centralized management from Management account via assume role
+for consistency and to maintain the control plane pattern.
+
 ## 7. IAM Identity Center Setup
 
 ### 7.1 Groups
@@ -174,11 +197,16 @@ It always runs under a dedicated IAM role.
 - ```TerraformExecutionRole-stage```
 - ```TerraformExecutionRole-prod```
 
+**Note:** Management account Terraform runs directly via SSO credentials (no dedicated execution role).
+
 Terraform flow:
 
 1. authenticate via SSO or CI
 1. assume TerraformExecutionRole
 1. talk to AWS APIs
+
+IAM policy changes are applied from the Management account via
+the member-account bootstrap role.
 
 ## 9. Trust Model
 
@@ -205,9 +233,19 @@ Actual access is controlled by:
 - IAM Identity Center assignments
 - TerraformExecutionRole permissions
 
+**Note for SMB/Startups:** Stage allows SSO access for manual testing and rapid iteration. This is an intentional design decision for smaller teams where:
+- Stage is used for pre-production validation and manual testing
+- Hardened permissions (same as Prod) prevent accidental production-like changes
+- Clear separation: Stage = SSO allowed, Prod = CI-only (when implemented)
+- This balances security with operational speed for small teams
+
 ### 9.2 Prod — CI/CD Only (GitHub OIDC)
 
-TODO
+**Target state:** CI/CD only via GitHub OIDC (not yet implemented)
+
+**Current state:** Uses SSO trust temporarily (same as Dev/Stage) until CI/CD is implemented.
+
+**Implementation status:** TODO - Will be implemented when CI/CD pipeline is set up
 
 ## 10. Permissions Model
 
@@ -221,16 +259,20 @@ TerraformExecutionRole policy controls:
 - allowed regions
 - resource scope
 
+TerraformExecutionRole does not have IAM write permissions.
+IAM changes are applied from the Management account.
+
 ## 11. Environment Strategy
 
 | **Environment** | **Human Writes** | **Terraform Permissions** |
 | :--- | :--- | :--- |
-| Dev | Allowed | Broad |
-| Stage | No | Hardened |
-| Prod | No | Hardened (CI-only) |
+| Dev | Allowed (SSO) | Broad |
+| Stage | Allowed (SSO) | Hardened |
+| Prod | No (CI-only, when implemented) | Hardened |
 
 Dev may drift.
-Stage & Prod must not.
+Stage uses hardened permissions (same as Prod) but allows SSO access for manual testing in SMB/startup environments.
+Prod must not drift and will be CI-only (GitHub OIDC) when implemented.
 
 ## 12. Policy Hardening Workflow (Dev → Stage → Prod)
 
@@ -300,11 +342,17 @@ Rules:
 
 ## 14. Terraform State & Safety
 
-- Remote state in S3
-- State locking via DynamoDB
-- One backend per environment
-- Buckets accessible only by TerraformExecutionRole
-- No human access to state
+- Remote state in a centralized S3 bucket (Management)
+- State locking via a centralized DynamoDB table (Management)
+- Separate state keys per environment (dev/stage/prod/management)
+- IAM policy scopes S3/DynamoDB access to per-environment key prefixes
+- Bucket/table accessible only by TerraformExecutionRole-* (from workload accounts) and SSO roles from Management account
+- Management account Terraform runs directly via SSO (no TerraformExecutionRole-management)
+- No human access to state in workload accounts
+
+Operational note:
+- Existing states are migrated with ```terraform init -migrate-state``` per environment key.
+- DynamoDB lock IDs match the state key, so key-prefix scoping applies to locks.
 
 ## 15. AssumeRole Flows (ASCII)
 
@@ -357,6 +405,14 @@ It removes ambiguity around:
 - who can deploy
 - how Terraform authenticates
 - why trust policies look unusual
+
+## SMB-Friendly Note
+
+For smaller teams, this repository uses a simplified IAM model:
+- No dedicated TerraformAdminRole-*
+- IAM changes are applied from the Management account via the
+  member-account bootstrap role (default: ```OrganizationAccountAccessRole```)
+- Execution roles in workload accounts do not have IAM write permissions
 
 ## Final Note
 

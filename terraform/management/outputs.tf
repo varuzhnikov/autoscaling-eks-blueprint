@@ -1,4 +1,4 @@
 output "accounts" {
   description = "Resolved AWS account IDs"
-  value       = local.accounts
+  value       = local.env_accounts
 }

@@ -15,3 +15,9 @@ variable "environments" {
   type        = list(string)
   default     = ["dev", "stage", "prod"]
 }
+
+variable "bootstrap_role_name" {
+  description = "Role name used to bootstrap access into member accounts"
+  type        = string
+  default     = "OrganizationAccountAccessRole"
+}

@@ -3,9 +3,9 @@ variable "bucket_name" {
   type        = string
 }
 
-variable "allowed_role" {
-  description = "IAM role allowed to access the Terraform state bucket"
-  type        = string
+variable "allowed_principal_arn_patterns" {
+  description = "IAM principal ARN patterns allowed to access the Terraform state bucket"
+  type        = list(string)
 }
 
 variable "tags" {

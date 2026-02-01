@@ -3,7 +3,16 @@
 #
 # IMPORTANT:
 # This role is NOT assumed directly by IAM users.
-# It is assumed by AWS IAM Identity Center (SSO) generated roles.
+# It is assumed by AWS IAM Identity Center (SSO) generated roles
+# (or CI/CD via OIDC for production, when implemented).
+#
+# Trust Model Flow:
+#   1. Management account: PlatformAdmins authenticate via SSO
+#   2. Terraform in Management uses cross-account assume role (OrganizationAccountAccessRole
+#      or equivalent) to create TerraformExecutionRole-* in member accounts
+#      (Note: PlatformAdmins may have SSO AdministratorAccess in member accounts,
+#       but architecture uses centralized management via assume role for consistency)
+#   3. Users authenticate via SSO and assume TerraformExecutionRole-* in their accounts
 #
 # When a user is assigned to an AWS account via:
 #   IAM Identity Center → Group → Permission Set → Account
@@ -20,11 +29,23 @@
 #   1) IAM Identity Center (who gets an SSO role in this account)
 #   2) TerraformExecutionRole IAM policy (what Terraform can do)
 #
+# IAM changes are applied from the Management account
+# to prevent TerraformExecutionRole-* from changing its own permissions.
+#
 # This allows:
 #   - Centralized user management via SSO
 #   - No IAM users or long-lived credentials
 #   - Safe onboarding/offboarding without Terraform changes
+#   - Management account as control plane (SSO access is appropriate there)
 # ------------------------------------------------------------
+terraform {
+  required_providers {
+    aws = {
+      source = "hashicorp/aws"
+    }
+  }
+}
+
 data "aws_iam_policy_document" "trust" {
   statement {
     sid    = "AllowTerraformRole"
@@ -32,16 +53,49 @@ data "aws_iam_policy_document" "trust" {
     
     principals {
       type = "AWS"
-      identifiers = var.trusted_role_arns
+      identifiers = ["*"]
     }
     
     actions = ["sts:AssumeRole"]
+
+    # Restrict to trusted principals (SSO roles or CI/CD)
+    condition {
+      test     = "StringLike"
+      variable = "aws:PrincipalArn"
+      values   = var.trusted_principal_arn_patterns
+    }
+
+    # Require MFA if enabled (recommended for Stage/Prod)
+    dynamic "condition" {
+      for_each = var.require_mfa ? [1] : []
+      content {
+        test     = "BoolIfExists"
+        variable = "aws:MultiFactorAuthPresent"
+        values   = ["true"]
+      }
+    }
   }
 }
 
+locals {
+  # Session duration constants (in seconds)
+  session_duration_broad    = 28800  # 8 hours for broad permissions mode
+  session_duration_hardened = 3600   # 1 hour for hardened permissions mode
+
+  # Default session duration based on permissions mode
+  # coalesce() returns the first non-null argument from left to right.
+  # This means: if max_session_duration is set (not null), use it;
+  # otherwise, fall back to the mode-based default (broad=8h, hardened=1h).
+  default_session_duration = coalesce(
+    var.max_session_duration,
+    var.permissions_mode == "broad" ? local.session_duration_broad : local.session_duration_hardened
+  )
+}
+
 resource "aws_iam_role" "this" {
-  name               = var.role_name
-  assume_role_policy = data.aws_iam_policy_document.trust.json
+  name                 = var.role_name
+  assume_role_policy  = data.aws_iam_policy_document.trust.json
+  max_session_duration = local.default_session_duration
   
   tags = {
     Purpose = "terraform-execution"
@@ -49,26 +103,67 @@ resource "aws_iam_role" "this" {
 }
 
 data "aws_iam_policy_document" "permissions" {
-  
   # Terraform state access (S3 backend)
+  # Access is scoped by state_key_prefix when provided.
+  #
+  # PREFIX GUARD (IMPORTANT):
+  # This is the only "magic" here. We lock each role to its own
+  # state prefix via conditions:
+  #
+  # - dev role    -> s3:prefix "dev/*" and dynamodb:LeadingKeys "dev/*"
+  # - stage role  -> s3:prefix "stage/*" and dynamodb:LeadingKeys "stage/*"
+  # - prod role   -> s3:prefix "prod/*" and dynamodb:LeadingKeys "prod/*"
+  # - management -> s3:prefix "management/*" and dynamodb:LeadingKeys "management/*"
+  #
+  # Example state key: dev/terraform.tfstate
+  # That key is used both for S3 objects and DynamoDB locks.
   statement {
-    sid    = "TerraformStateS3Access"
+    sid    = "TerraformStateList"
     effect = "Allow"
-    
+
+    actions = [
+      "s3:ListBucket"
+    ]
+
+    resources = [
+      var.state_bucket_arn
+    ]
+
+    # Limit list access to the environment prefix (e.g., dev/*).
+    # state_key_prefix is required, so this condition is always applied.
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["${var.state_key_prefix}*"]
+    }
+  }
+
+  statement {
+    sid    = "TerraformStateObjectAccess"
+    effect = "Allow"
+
     actions = [
       "s3:GetObject",
       "s3:PutObject",
-      "s3:DeleteObject",
-      "s3:ListBucket"
+      "s3:DeleteObject"
     ]
-    
+
+    # Restrict object access to the environment prefix.
+    # state_key_prefix is required, so access is always scoped to the prefix.
+    #
+    # Examples:
+    # - dev role with state_key_prefix = "dev/" → "arn:aws:s3:::bucket-name/dev/*"
+    # - stage role with state_key_prefix = "stage/" → "arn:aws:s3:::bucket-name/stage/*"
+    # - prod role with state_key_prefix = "prod/" → "arn:aws:s3:::bucket-name/prod/*"
+    #
+    # This enforces environment isolation at the IAM policy level.
     resources = [
-      var.state_bucket_arn,
-      "${var.state_bucket_arn}/*"
+      "${var.state_bucket_arn}/${var.state_key_prefix}*"
     ]
   }
 
   # Terraform state locking (dynamodb)
+  # Lock access is scoped by state_key_prefix when provided.
   statement {
     sid = "TerraformStateLocking"
     effect = "Allow"
@@ -83,43 +178,190 @@ data "aws_iam_policy_document" "permissions" {
     resources = [
       var.lock_table_arn
     ]
+
+    # Lock entries use the state key, so enforce the same prefix.
+    # state_key_prefix is required, so this condition is always applied.
+    condition {
+      test     = "StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["${var.state_key_prefix}*"]
+    }
   }
 
-  # VPC management
-  #statement {
-  #  sid    = "VpcManagement"
-  #  effect = "Allow"
+  # ============================================================
+  # Workload Permissions (based on permissions_mode)
+  # ============================================================
 
-  #  actions = [
-  #    "ec2:CreateVpc",
-  #    "ec2:DeleteVpc",
-  #    "ec2:DescribeVpc",
-      
-  #    "ec2:CreateSubnet",
-  #    "ec2:DeleteSubnet",
-  #    "ec2:DescribeSubnets",
+  # BROAD PERMISSIONS (Dev environment)
+  # PowerUserAccess-like: most AWS services, no IAM write access
+  dynamic "statement" {
+    for_each = var.permissions_mode == "broad" ? [1] : []
+    content {
+      sid    = "BroadWorkloadPermissions"
+      effect = "Allow"
 
-  #    "ec2:CreateInternetGateway",
-  #    "ec2:AttachInternetGateway",
-  #    "ec2:DetachInternetGateway",
-  #    "ec2:DeleteInternetGateway",
+      actions = [
+        # EC2 (VPC, instances, security groups, etc.)
+        "ec2:*",
+        # EKS
+        "eks:*",
+        # ECS
+        "ecs:*",
+        # RDS
+        "rds:*",
+        # S3 (for application data, not state)
+        "s3:*",
+        # CloudWatch
+        "cloudwatch:*",
+        "logs:*",
+        # IAM read-only (no write access)
+        "iam:Get*",
+        "iam:List*",
+        "iam:Describe*",
+        # Route53
+        "route53:*",
+        # ELB/ALB
+        "elasticloadbalancing:*",
+        # Auto Scaling
+        "autoscaling:*",
+        # Lambda
+        "lambda:*",
+        # API Gateway
+        "apigateway:*",
+        # Secrets Manager
+        "secretsmanager:*",
+        # Systems Manager
+        "ssm:*",
+        # CloudFormation (for nested stacks)
+        "cloudformation:*",
+        # Tagging
+        "tag:*",
+        # Resource Groups
+        "resource-groups:*",
+        # Service Quotas
+        "servicequotas:Get*",
+        "servicequotas:List*"
+      ]
 
-  #    "ec2:CreateRouteTable",
-  #    "ec2:DeleteRouteTable",
-  #    "ec2:CreateRoute",
-  #    "ec2:AssociateRouteTable",
-  #    "ec2:DisassociateRouteTable",
-  #    "ec2:DescribeRouteTables"
-  #  ]
-    
-  #  resources = ["*"]
+      resources = ["*"]
 
-  #  condition {
-  #    test     = "StringEquals"
-  #    variable = "aws:RequestedRegion"
-  #    values   = [var.aws_region]
-  #  }
-  #}
+      # Restrict to specified region
+      condition {
+        test     = "StringEquals"
+        variable = "aws:RequestedRegion"
+        values   = [var.aws_region]
+      }
+    }
+  }
+
+  # HARDENED PERMISSIONS (Stage/Prod environments)
+  # Minimal permissions - add specific actions as needed
+  # This is a starting point; customize based on actual Terraform usage
+  dynamic "statement" {
+    for_each = var.permissions_mode == "hardened" ? [1] : []
+    content {
+      sid    = "HardenedWorkloadPermissions"
+      effect = "Allow"
+
+      actions = [
+        # EC2 - VPC and networking (minimal set)
+        "ec2:CreateVpc",
+        "ec2:DeleteVpc",
+        "ec2:DescribeVpcs",
+        "ec2:ModifyVpcAttribute",
+        "ec2:CreateSubnet",
+        "ec2:DeleteSubnet",
+        "ec2:DescribeSubnets",
+        "ec2:ModifySubnetAttribute",
+        "ec2:CreateInternetGateway",
+        "ec2:DeleteInternetGateway",
+        "ec2:AttachInternetGateway",
+        "ec2:DetachInternetGateway",
+        "ec2:DescribeInternetGateways",
+        "ec2:CreateRouteTable",
+        "ec2:DeleteRouteTable",
+        "ec2:CreateRoute",
+        "ec2:DeleteRoute",
+        "ec2:ReplaceRoute",
+        "ec2:AssociateRouteTable",
+        "ec2:DisassociateRouteTable",
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeNetworkAcls",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeNetworkInterfaces",
+        # EC2 - Instances (if needed)
+        "ec2:RunInstances",
+        "ec2:TerminateInstances",
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:RebootInstances",
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceStatus",
+        "ec2:ModifyInstanceAttribute",
+        # EKS (minimal set - adjust based on needs)
+        "eks:CreateCluster",
+        "eks:DeleteCluster",
+        "eks:DescribeCluster",
+        "eks:ListClusters",
+        "eks:UpdateClusterVersion",
+        "eks:UpdateClusterConfig",
+        "eks:CreateNodegroup",
+        "eks:DeleteNodegroup",
+        "eks:DescribeNodegroup",
+        "eks:ListNodegroups",
+        "eks:UpdateNodegroupVersion",
+        "eks:UpdateNodegroupConfig",
+        # IAM read-only (no write access)
+        "iam:Get*",
+        "iam:List*",
+        "iam:Describe*",
+        # CloudWatch and Logs
+        "logs:CreateLogGroup",
+        "logs:DeleteLogGroup",
+        "logs:DescribeLogGroups",
+        "logs:PutRetentionPolicy",
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
+        "cloudwatch:DescribeAlarms",
+        # Tagging
+        "tag:GetResources",
+        "tag:TagResources",
+        "tag:UntagResources",
+        # Service Quotas (read-only)
+        "servicequotas:GetServiceQuota",
+        "servicequotas:ListServiceQuotas"
+      ]
+
+      resources = ["*"]
+
+      # Restrict to specified region
+      condition {
+        test     = "StringEquals"
+        variable = "aws:RequestedRegion"
+        values   = [var.aws_region]
+      }
+    }
+  }
+
+  # CUSTOM PERMISSIONS (from additional_permissions variable)
+  dynamic "statement" {
+    for_each = var.permissions_mode == "custom" ? var.additional_permissions : []
+    content {
+      sid       = try(statement.value.sid, null)
+      effect    = statement.value.effect
+      actions   = statement.value.actions
+      resources = statement.value.resources
+
+      dynamic "condition" {
+        for_each = try(statement.value.conditions, [])
+        content {
+          test     = condition.value.test
+          variable = condition.value.variable
+          values   = condition.value.values
+        }
+      }
+    }
+  }
 }
 
 resource "aws_iam_policy" "this" {

@@ -1,0 +1,10 @@
+bucket         = "tf-state-YOUR_PROJECT-management-YOUR_ACCOUNT_ID"
+key            = "management/terraform.tfstate"
+region         = "eu-central-1"
+dynamodb_table = "terraform-locks-YOUR_PROJECT-management"
+encrypt        = true
+
+# Use per-environment keys with the same backend bucket/table:
+# key = "dev/terraform.tfstate"
+# key = "stage/terraform.tfstate"
+# key = "prod/terraform.tfstate"
