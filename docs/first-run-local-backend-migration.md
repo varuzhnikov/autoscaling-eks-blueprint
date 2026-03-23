@@ -119,6 +119,7 @@ terraform plan
   - S3 bucket for state
   - DynamoDB table for locks
   - TerraformExecutionRole-* in member accounts
+  - TerraformStateAccessRole-* in Management account (backend access roles)
 
 **Review the plan:**
 - Verify that correct resources will be created
@@ -170,6 +171,7 @@ Do you want to perform these actions?
 - ✅ Terraform creates S3 bucket
 - ✅ Terraform creates DynamoDB table
 - ✅ Terraform creates TerraformExecutionRole-* in member accounts
+- ✅ Terraform creates TerraformStateAccessRole-* in Management account
 - ✅ State is saved locally in `terraform.tfstate`
 
 **After successful apply:**

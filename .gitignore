@@ -45,3 +45,9 @@ debug.log
 
 # Ignore scripts folder
 scripts/
+
+# Ignore dev live backend.hcl
+terraform/live/dev/backend.hcl
+
+# Ignore docs aws_iam
+docs/aws_iam/

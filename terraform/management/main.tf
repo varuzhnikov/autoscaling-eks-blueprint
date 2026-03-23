@@ -23,26 +23,51 @@ locals {
        contains(var.environments, replace(account.name, "${var.project}-", ""))
   }
 
-  terraform_execution_role_arns = [
+  # Assumed-role ARN patterns (for resource policies that check assumed-role ARN via aws:PrincipalArn)
+  # When a role is assumed via AWS profile or assume_role, aws:PrincipalArn has format:
+  # arn:aws:sts::<account-id>:assumed-role/<role-name>/<session-name>
+  # Session names are unpredictable (e.g., "aws-go-sdk-..."), so we use wildcard pattern
+  terraform_execution_assumed_role_arn_patterns = [
+    for env, account_id in local.env_accounts :
+    "arn:aws:sts::${account_id}:assumed-role/TerraformExecutionRole-${env}/*"
+  ]
+
+  # IAM role ARN patterns.
+  #
+  # In some AWS services/policy-condition evaluations, `aws:PrincipalArn`
+  # may be evaluated in IAM-role ARN format even when the caller uses
+  # STS assumed-role credentials.
+  # We include both formats to make S3 bucket policy principal matching robust.
+  terraform_execution_role_arn_patterns = [
     for env, account_id in local.env_accounts :
     "arn:aws:iam::${account_id}:role/TerraformExecutionRole-${env}"
   ]
 
-  # Allow access to backend/locks for:
-  # 1. TerraformExecutionRole-* from workload accounts (dev, stage, prod)
-  #    - These roles are created in member accounts via cross-account assume_role
-  #    - Used for Terraform execution in workload accounts (not in Management)
-  # 2. SSO roles from Management account
-  #    - Management account Terraform runs directly via SSO credentials (PlatformAdmin)
-  #    - No TerraformExecutionRole-management is created (by design - see iam-design.md)
-  #    - SSO roles are used when PlatformAdmins run Terraform from Management account
   backend_allowed_principal_arn_patterns = concat(
-    local.terraform_execution_role_arns,
-    [
-      # SSO roles from Management account (used when Terraform runs directly via SSO)
-      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/aws-reserved/sso.amazonaws.com/*"
-    ]
+    local.terraform_execution_assumed_role_arn_patterns,
+    local.terraform_execution_role_arn_patterns,
+    module.backend_access_roles.assumed_role_arn_patterns,
+    module.backend_access_roles.role_arn_patterns,
+    ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/aws-reserved/sso.amazonaws.com/*"]
   )
+
+  terraform_role_settings = {
+    dev = {
+      permissions_mode     = "broad"
+      require_mfa          = false
+      max_session_duration = 28800
+    }
+    stage = {
+      permissions_mode     = "hardened"
+      require_mfa          = true
+      max_session_duration = 3600
+    }
+    prod = {
+      permissions_mode     = "hardened"
+      require_mfa          = true
+      max_session_duration = 3600
+    }
+  }
 }
 
 # ------------------------------------------------------------
@@ -74,6 +99,15 @@ module "management_locks" {
   }
 }
 
+module "backend_access_roles" {
+  source = "../modules/iam-backend-access-role"
+
+  env_accounts          = local.env_accounts
+  management_account_id = data.aws_caller_identity.current.account_id
+  state_bucket_arn      = module.management_backend.bucket_arn
+  lock_table_arn        = module.management_locks.table_arn
+}
+
 module "terraform_role_dev" {
   count = contains(keys(local.env_accounts), "dev") ? 1 : 0
 
@@ -100,10 +134,9 @@ module "terraform_role_dev" {
   # Prefix guard: ties this role to dev/* in S3/DynamoDB.
   state_key_prefix = "dev/"
 
-  # Dev: Broad permissions for rapid development
-  permissions_mode     = "broad"
-  require_mfa          = false
-  max_session_duration = 28800 # 8 hours
+  permissions_mode     = local.terraform_role_settings["dev"].permissions_mode
+  require_mfa          = local.terraform_role_settings["dev"].require_mfa
+  max_session_duration = local.terraform_role_settings["dev"].max_session_duration
 }
 
 module "terraform_role_stage" {
@@ -135,10 +168,9 @@ module "terraform_role_stage" {
   # Prefix guard: ties this role to stage/* in S3/DynamoDB.
   state_key_prefix = "stage/"
 
-  # Stage: Hardened permissions with MFA requirement
-  permissions_mode     = "hardened"
-  require_mfa          = true
-  max_session_duration = 3600 # 1 hour
+  permissions_mode     = local.terraform_role_settings["stage"].permissions_mode
+  require_mfa          = local.terraform_role_settings["stage"].require_mfa
+  max_session_duration = local.terraform_role_settings["stage"].max_session_duration
 }
 
 module "terraform_role_prod" {
@@ -164,10 +196,35 @@ module "terraform_role_prod" {
   # Prefix guard: ties this role to prod/* in S3/DynamoDB.
   state_key_prefix = "prod/"
 
-  # Prod: Hardened permissions with MFA requirement and short session duration
-  # NOTE: AWS requires minimum 3600 seconds (1 hour) for IAM role max_session_duration.
-  # For CI/CD (GitHub OIDC), consider increasing to 14400 (4 hours) for pipeline execution.
-  permissions_mode     = "hardened"
-  require_mfa          = true
-  max_session_duration = 3600 # 1 hour (AWS minimum; increase for CI/CD if needed)
+  permissions_mode     = local.terraform_role_settings["prod"].permissions_mode
+  require_mfa          = local.terraform_role_settings["prod"].require_mfa
+  max_session_duration = local.terraform_role_settings["prod"].max_session_duration
+}
+
+# Allow only dev execution role to assume dev backend access role in management.
+data "aws_iam_policy_document" "allow_assume_backend_dev" {
+  count = contains(keys(local.env_accounts), "dev") ? 1 : 0
+
+  statement {
+    sid     = "AssumeDevBackendStateAccessRole"
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+    resources = [
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/TerraformStateAccessRole-dev"
+    ]
+  }
+}
+
+resource "aws_iam_policy" "allow_assume_backend_dev" {
+  count    = contains(keys(local.env_accounts), "dev") ? 1 : 0
+  name     = "TerraformExecutionRole-dev-assume-backend"
+  policy   = data.aws_iam_policy_document.allow_assume_backend_dev[0].json
+  provider = aws.dev
+}
+
+resource "aws_iam_role_policy_attachment" "allow_assume_backend_dev" {
+  count      = contains(keys(local.env_accounts), "dev") ? 1 : 0
+  role       = "TerraformExecutionRole-dev"
+  policy_arn = aws_iam_policy.allow_assume_backend_dev[0].arn
+  provider   = aws.dev
 }

@@ -346,7 +346,10 @@ Rules:
 - State locking via a centralized DynamoDB table (Management)
 - Separate state keys per environment (dev/stage/prod/management)
 - IAM policy scopes S3/DynamoDB access to per-environment key prefixes
-- Bucket/table accessible only by TerraformExecutionRole-* (from workload accounts) and SSO roles from Management account
+- Backend access uses dedicated management roles `TerraformStateAccessRole-*` with per-environment prefix guards
+- Workload execution roles (`TerraformExecutionRole-*`) are allowed to assume matching backend role for their environment
+- Current rollout: explicit assume permission is enabled for `dev -> TerraformStateAccessRole-dev`
+- Bucket/table allowlist includes execution roles, backend state roles, and SSO roles from Management account
 - Management account Terraform runs directly via SSO (no TerraformExecutionRole-management)
 - No human access to state in workload accounts
 
@@ -367,6 +370,8 @@ SSO-generated IAM Role
 aws-reserved/sso.amazonaws.com/*
    ↓  sts:AssumeRole
 TerraformExecutionRole-dev / stage
+   ↓  sts:AssumeRole (backend, currently wired for dev)
+TerraformStateAccessRole-dev
    ↓
 AWS APIs
 ```

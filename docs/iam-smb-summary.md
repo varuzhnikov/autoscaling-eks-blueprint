@@ -22,7 +22,8 @@ using Terraform and SSO, suitable for SMBs and startups.
 **For workload accounts (Dev/Stage/Prod):**
 1) Human authenticates via SSO (PlatformAdmin or DevEngineers)
 2) Terraform uses a dedicated execution role (`TerraformExecutionRole-*`) in each account
-3) State stored centrally with per‑environment key prefixes
+3) Backend assumes a dedicated management state role (`TerraformStateAccessRole-*`) for state/locks
+4) State stored centrally with per‑environment key prefixes
 
 **For Management account:**
 - Terraform runs directly via SSO credentials (no dedicated execution role)
@@ -31,10 +32,15 @@ using Terraform and SSO, suitable for SMBs and startups.
 ## Roles (SMB‑Friendly)
 
 - `TerraformExecutionRole-dev|stage|prod`
-  - Access to centralized state (dev/*, stage/*, prod/*)
+  - Access to workload APIs in their account
   - No IAM write permissions
   - Dev & Stage: SSO access allowed (Stage uses hardened permissions for safety)
   - Prod: SSO temporarily, will be CI-only (GitHub OIDC) when implemented
+
+- `TerraformStateAccessRole-dev|stage|prod` (Management account)
+  - Access to centralized state backend with prefix guard per environment
+  - Assumed by matching execution role (`TerraformExecutionRole-<env>`)
+  - Current rollout: explicit assume permission is enabled for `dev`
 
 IAM changes in workload accounts are applied from Management account using
 cross-account assume role (`OrganizationAccountAccessRole` or equivalent).

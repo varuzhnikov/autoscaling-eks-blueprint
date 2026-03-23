@@ -1,0 +1,9 @@
+bucket         = "tf-state-autoscaling-eks-management-<MANAGEMENT-ACCOUNT-ID>"
+key            = "dev/vpc/terraform.tfstate"
+region         = "eu-central-1"
+dynamodb_table = "terraform-locks-autoscaling-eks-management"
+encrypt        = true
+assume_role = {
+  role_arn     = "arn:aws:iam::<MANAGEMENT-ACCOUNT-ID>:role/TerraformStateAccessRole-dev"
+  session_name = "terraform-backend-dev"
+}

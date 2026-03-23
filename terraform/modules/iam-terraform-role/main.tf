@@ -132,9 +132,9 @@ data "aws_iam_policy_document" "permissions" {
     # Limit list access to the environment prefix (e.g., dev/*).
     # state_key_prefix is required, so this condition is always applied.
     condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values   = ["${var.state_key_prefix}*"]
+        test     = "StringLike"
+        variable = "s3:prefix"
+        values   = ["${var.state_key_prefix}*"]
     }
   }
 
@@ -182,9 +182,9 @@ data "aws_iam_policy_document" "permissions" {
     # Lock entries use the state key, so enforce the same prefix.
     # state_key_prefix is required, so this condition is always applied.
     condition {
-      test     = "StringLike"
-      variable = "dynamodb:LeadingKeys"
-      values   = ["${var.state_key_prefix}*"]
+        test     = "StringLike"
+        variable = "dynamodb:LeadingKeys"
+        values   = ["${var.state_key_prefix}*"]
     }
   }
 

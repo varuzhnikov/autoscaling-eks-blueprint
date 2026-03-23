@@ -208,8 +208,14 @@ data "aws_iam_policy_document" "this" {
     #
     # NOTE:
     # This bucket policy is a coarse allowlist. It admits multiple
-    # TerraformExecutionRole-* principals, while fine-grained scoping
-    # (e.g., dev/* vs prod/*) is enforced in each role's IAM policy.
+    # TerraformExecutionRole-* principals (assumed-role ARNs) and SSO roles from Management account,
+    # while fine-grained scoping (e.g., dev/* vs prod/*) is enforced in each role's IAM policy.
+    #
+    # aws:PrincipalArn format:
+    # - For assumed roles (TerraformExecutionRole-*): "arn:aws:sts::<account-id>:assumed-role/<role-name>/<session-name>"
+    #   (TerraformExecutionRole-* are always used via assume_role, so aws:PrincipalArn is in assumed-role format)
+    # - For SSO roles (Management account): "arn:aws:iam::<account-id>:role/aws-reserved/sso.amazonaws.com/<role-name>"
+    #   (SSO roles are used directly, so aws:PrincipalArn is in IAM role ARN format)
     #
     # This avoids direct Principal references and
     # works reliably with IAM eventual consistency.

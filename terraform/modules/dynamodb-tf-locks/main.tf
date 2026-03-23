@@ -47,7 +47,9 @@ resource "aws_dynamodb_table" "this" {
 # Architecture:
 # - This table policy is a coarse allowlist at the DynamoDB resource level
 # - It admits multiple TerraformExecutionRole-* principals from different accounts
-#   and SSO roles from Management account
+#   (assumed-role ARNs) and SSO roles from Management account
+# - TerraformExecutionRole-* are always used via assume_role, so aws:PrincipalArn is in
+#   assumed-role format: arn:aws:sts::<account-id>:assumed-role/<role-name>/<session-name>
 # - Fine-grained scoping (per-environment lock keys) is enforced in each role's IAM policy
 #   via dynamodb:LeadingKeys condition (e.g., dev/*, stage/*, prod/*)
 # - This two-level approach:
@@ -57,6 +59,7 @@ resource "aws_dynamodb_table" "this" {
 # Why use Principal = "*" with condition instead of direct Principal references?
 # - Avoids IAM eventual consistency issues (roles may not exist when policy is created)
 # - Allows wildcard patterns for SSO roles (unpredictable names like aws-reserved/sso.amazonaws.com/*)
+# - Supports assumed-role ARNs (session names are unpredictable: arn:aws:sts::<account-id>:assumed-role/<role-name>/*)
 # - More flexible and maintainable
 data "aws_iam_policy_document" "access" {
   count = length(var.allowed_principal_arn_patterns) > 0 ? 1 : 0
@@ -80,13 +83,16 @@ data "aws_iam_policy_document" "access" {
     resources = [aws_dynamodb_table.this.arn]
 
     # Why StringLike instead of StringEquals?
-    # - allowed_principal_arn_patterns contains both exact ARNs and wildcard patterns:
-    #   * Exact ARNs: "arn:aws:iam::<account-id>:role/TerraformExecutionRole-dev"
-    #   * Wildcard patterns: "arn:aws:iam::<account-id>:role/aws-reserved/sso.amazonaws.com/*"
+    # - allowed_principal_arn_patterns contains wildcard patterns:
+    #   * Assumed-role ARN patterns: "arn:aws:sts::<account-id>:assumed-role/TerraformExecutionRole-dev/*"
+    #     (When a role is assumed, aws:PrincipalArn has format: arn:aws:sts::<account-id>:assumed-role/<role-name>/<session-name>)
+    #     Session names are unpredictable (e.g., "aws-go-sdk-..."), so wildcard is required
+    #   * SSO role patterns: "arn:aws:iam::<account-id>:role/aws-reserved/sso.amazonaws.com/*"
+    #     SSO role names are unpredictable, so wildcard is required
     # - StringEquals requires exact match (no wildcards supported)
-    # - StringLike supports both exact matches AND wildcard patterns (*, ?)
-    # - This allows SSO roles (unpredictable names require wildcards) while still
-    #   supporting exact role ARNs (StringLike works for exact matches too)
+    # - StringLike supports wildcard patterns (*, ?)
+    # - This allows SSO roles (unpredictable names require wildcards) and assumed-role ARNs
+    #   (session names are unpredictable)
     condition {
       test     = "StringLike"
       variable = "aws:PrincipalArn"
